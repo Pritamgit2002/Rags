@@ -1,0 +1,34 @@
+{
+  "name": "turbo",
+  "private": true,
+  "scripts": {
+    "build": "turbo build",
+    "dev": "turbo dev",
+    "lint": "turbo lint",
+    "format": "turbo format",
+    "typecheck": "turbo typecheck",
+    "clean": "find . -name 'node_modules' -type d -prune -exec rm -rf {} + ; find . -name '.next' -type d -prune -exec rm -rf {} + ; find . -name 'dist' -type d -prune -exec rm -rf {} + ; find . -name '.turbo' -type d -prune -exec rm -rf {} + ; rm -f bun.lock",
+    "db:push": "cd packages/db && bun run --env-file ../../.env drizzle-kit push",
+    "db:generate": "cd packages/db && bun run --env-file ../../.env drizzle-kit generate",
+    "db:migrate": "cd packages/db && bun run --env-file ../../.env drizzle-kit migrate",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0",
+    "prettier": "^3.7.4",
+    "turbo": "^2.9.6",
+    "typescript": "5.9.2"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "packageManager": "bun@1.3.9",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "lint-staged": {
+    "**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,mdx,css}": "prettier --write"
+  }
+}
