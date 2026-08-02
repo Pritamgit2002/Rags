@@ -17,4 +17,7 @@ export const env = {
   R2_ACCESS_KEY_ID: get("R2_ACCESS_KEY_ID"),
   R2_SECRET_ACCESS_KEY: get("R2_SECRET_ACCESS_KEY"),
   R2_BUCKET_NAME: get("R2_BUCKET_NAME"),
+  R2_PUBLIC_URL: get("R2_PUBLIC_URL"),
+  OPENAI_API_KEY: get("OPENAI_API_KEY", true),
+  DISCORD_WEBHOOK_URL: get("DISCORD_WEBHOOK_URL", true),
 } as const;

@@ -1,5 +1,5 @@
 ---
-description: Patterns for controllers, SSE streaming, tools, agent loops, and agent handoffs in apps/ai
+description: Patterns for controllers, SSE streaming, Socket.IO, tools, agent loops, and agent handoffs in apps/ai
 globs: apps/ai/**
 alwaysApply: false
 ---
@@ -12,45 +12,359 @@ Same structure as `crud` — one router per resource, `is_authenticated` first, 
 
 ```ts
 // src/routes/chat.ts
-const router: IRouter = Router()
-router.use(is_authenticated)
-router.post("/:id/completion", chat_completion)
-export { router as chat_router }
+const router: IRouter = Router();
+router.use(is_authenticated);
+router.post("/:id/completion", chat_completion); // SSE — web
+export { router as chat_router };
 ```
 
-Mounted in `app.ts` at `/chats`, `/agents`, `/quiz`. Socket.IO is attached to the same HTTP server for mobile clients — same emitter pipeline.
+Mounted in `app.ts` at `/chats`, `/agents`, `/quiz`. Socket.IO is attached to the **same HTTP server** for mobile clients — both transports share the identical emitter pipeline.
 
-## Controllers + SSE Transport
+---
 
-Controllers are thin — they set up SSE headers and delegate to a service function via **emitter callbacks**. This keeps the pipeline transport-agnostic (HTTP SSE and Socket.IO share the same service).
+## Streaming Architecture — Two Transports, One Pipeline
+
+The service layer (`run_chat_completion`, `run_agent_loop`) is completely transport-agnostic. It receives an `emitters` object and calls its callbacks. The controller decides which transport fills those callbacks.
+
+```
+Client (web)  ──SSE──►  Express controller  ──emitters──►  run_chat_completion
+Client (app)  ──WS───►  Socket.IO handler   ──emitters──►  run_chat_completion
+                                                                  │
+                                                         run_agent_loop
+                                                         stream_text_with_fallback
+```
+
+### Emitter interface (shared)
 
 ```ts
-export const chat_completion = async (req: Request, res: Response) => {
-  const { id: user_id } = req.user!
-  const { id: conversation_id } = z_chat_completion_params.parse(req.params)
-  const { prompt, user_files } = z_chat_completion_body.parse(req.body)
-
-  await run_chat_completion({
-    conversation_id, user_id, prompt, user_files,
-    emitters: {
-      on_validated: () => {
-        res.setHeader("Content-Type", "text/event-stream")
-        res.setHeader("Cache-Control", "no-cache")
-        res.setHeader("Connection", "keep-alive")
-        res.flushHeaders()
-      },
-      on_title:          (title) => res.write(`event: title\ndata: ${JSON.stringify({ title })}\n\n`),
-      on_text_delta:     (text)  => res.write(`event: text-delta\ndata: ${JSON.stringify({ text })}\n\n`),
-      on_thinking_delta: (text)  => res.write(`event: thinking-delta\ndata: ${JSON.stringify({ text })}\n\n`),
-      on_tool_call:      (e)     => res.write(`event: tool-call\ndata: ${JSON.stringify(e)}\n\n`),
-      on_tool_result:    (e)     => res.write(`event: tool-result\ndata: ${JSON.stringify(e)}\n\n`),
-      on_status:         (text)  => res.write(`event: status\ndata: ${JSON.stringify({ text })}\n\n`),
-      on_complete:       (id)    => { res.write(`event: complete\ndata: ${JSON.stringify({ conversation_id: id })}\n\n`); res.end() },
-      on_error:          (msg)   => { res.write(`event: error\ndata: ${JSON.stringify({ message: msg })}\n\n`); res.end() },
-    },
-  })
+// src/types/emitters.ts
+export interface TStreamEmitters {
+  on_validated: () => void;
+  on_title: (title: string) => void;
+  on_text_delta: (text: string) => void;
+  on_thinking_delta: (text: string) => void;
+  on_tool_call: (e: TToolCallEvent) => void;
+  on_tool_result: (e: TToolResultEvent) => void;
+  on_status: (text: string) => void;
+  on_complete: (conversation_id: string) => void;
+  on_error: (message: string) => void;
 }
 ```
+
+---
+
+## Transport 1 — SSE (web / Next.js)
+
+### Server: controller sets up SSE headers inside `on_validated`
+
+```ts
+// src/controllers/chat/chat-completion.ts
+export const chat_completion = async (req: Request, res: Response) => {
+  const { id: user_id } = req.user!;
+  const { id: conversation_id } = z_chat_completion_params.parse(req.params);
+  const { prompt, user_files } = z_chat_completion_body.parse(req.body);
+
+  await run_chat_completion({
+    conversation_id,
+    user_id,
+    prompt,
+    user_files,
+    emitters: {
+      on_validated: () => {
+        res.setHeader("Content-Type", "text/event-stream");
+        res.setHeader("Cache-Control", "no-cache");
+        res.setHeader("Connection", "keep-alive");
+        res.flushHeaders();
+      },
+      on_title: (title) =>
+        res.write(`event: title\ndata: ${JSON.stringify({ title })}\n\n`),
+      on_text_delta: (text) =>
+        res.write(`event: text-delta\ndata: ${JSON.stringify({ text })}\n\n`),
+      on_thinking_delta: (text) =>
+        res.write(
+          `event: thinking-delta\ndata: ${JSON.stringify({ text })}\n\n`
+        ),
+      on_tool_call: (e) =>
+        res.write(`event: tool-call\ndata: ${JSON.stringify(e)}\n\n`),
+      on_tool_result: (e) =>
+        res.write(`event: tool-result\ndata: ${JSON.stringify(e)}\n\n`),
+      on_status: (text) =>
+        res.write(`event: status\ndata: ${JSON.stringify({ text })}\n\n`),
+      on_complete: (id) => {
+        res.write(
+          `event: complete\ndata: ${JSON.stringify({ conversation_id: id })}\n\n`
+        );
+        res.end();
+      },
+      on_error: (msg) => {
+        res.write(
+          `event: error\ndata: ${JSON.stringify({ message: msg })}\n\n`
+        );
+        res.end();
+      },
+    },
+  });
+};
+```
+
+**Rules:**
+
+- SSE headers are **only** set inside `on_validated` — never before validation, never inside a service
+- `on_validated` is called after the conversation is loaded and the user message is persisted — headers flush only when the request is confirmed valid
+- `on_complete` and `on_error` both call `res.end()` — never leave the connection open after either
+
+### Client: consuming SSE in Next.js (web)
+
+Use the native `fetch` API with a `ReadableStream` decoder — **not** `EventSource` (EventSource cannot send POST bodies or custom headers).
+
+```ts
+// apps/web/src/hooks/use-chat-stream.ts
+export function useChatStream() {
+  const stream_completion = async (conversation_id: string, prompt: string) => {
+    const token = await firebase_auth.currentUser?.getIdToken();
+
+    const res = await fetch(
+      `${process.env.NEXT_PUBLIC_AI_URL}/chats/${conversation_id}/completion`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ prompt }),
+      }
+    );
+
+    if (!res.ok || !res.body) throw new Error("Stream failed");
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() ?? ""; // keep incomplete trailing chunk
+
+      for (const part of parts) {
+        const event_line = part.match(/^event: (\S+)/);
+        const data_line = part.match(/^data: (.+)/m);
+        if (!event_line || !data_line) continue;
+
+        const event = event_line[1];
+        const data = JSON.parse(data_line[1]);
+
+        switch (event) {
+          case "title":
+            handle_title(data.title);
+            break;
+          case "text-delta":
+            handle_delta(data.text);
+            break;
+          case "thinking-delta":
+            handle_thinking(data.text);
+            break;
+          case "tool-call":
+            handle_tool_call(data);
+            break;
+          case "tool-result":
+            handle_tool_result(data);
+            break;
+          case "status":
+            handle_status(data.text);
+            break;
+          case "complete":
+            handle_complete(data.conversation_id);
+            break;
+          case "error":
+            handle_error(data.message);
+            break;
+        }
+      }
+    }
+  };
+
+  return { stream_completion };
+}
+```
+
+---
+
+## Transport 2 — Socket.IO (mobile / React Native)
+
+### Server: attach Socket.IO to the Express HTTP server
+
+```ts
+// src/app.ts
+import express from "express";
+import { createServer } from "http";
+import { Server as SocketIOServer } from "socket.io";
+import { register_socket_handlers } from "@/socket";
+
+export function createApp() {
+  const app = express();
+  const server = createServer(app);
+  const io = new SocketIOServer(server, {
+    cors: { origin: "*", methods: ["GET", "POST"] },
+  });
+
+  // mount REST routes
+  app.use("/chats", chat_router);
+  app.use("/agents", agent_router);
+
+  // attach Socket.IO handlers
+  register_socket_handlers(io);
+
+  return server; // return the http.Server, not app
+}
+```
+
+```ts
+// src/index.ts  — listen on the http.Server, not app
+const server = createApp();
+server.listen(port, () => console.log(`✓ [server] http://localhost:${port}`));
+```
+
+### Server: Socket.IO handler — mirrors the SSE controller
+
+```ts
+// src/socket/index.ts
+import { Server, Socket } from "socket.io";
+import { verify_firebase_token } from "@/middleware/verify-token";
+import { run_chat_completion } from "@/services/chat-completion";
+
+export function register_socket_handlers(io: Server) {
+  // auth handshake — verify Firebase token from socket.handshake.auth
+  io.use(async (socket, next) => {
+    const token = socket.handshake.auth?.token as string | undefined;
+    if (!token) return next(new Error("Unauthorized"));
+    try {
+      socket.data.firebase_user = await verify_firebase_token(token);
+      next();
+    } catch {
+      next(new Error("Unauthorized"));
+    }
+  });
+
+  io.on("connection", (socket: Socket) => {
+    socket.on(
+      "chat:completion",
+      async (payload: {
+        conversation_id: string;
+        prompt: string;
+        user_files?: unknown[];
+      }) => {
+        const { conversation_id, prompt, user_files } = payload;
+        const { uid } = socket.data.firebase_user;
+
+        await run_chat_completion({
+          conversation_id,
+          user_id: uid,
+          prompt,
+          user_files,
+          emitters: {
+            on_validated: () =>
+              socket.emit("chat:validated", { conversation_id }),
+            on_title: (title) => socket.emit("chat:title", { title }),
+            on_text_delta: (text) => socket.emit("chat:text-delta", { text }),
+            on_thinking_delta: (text) =>
+              socket.emit("chat:thinking-delta", { text }),
+            on_tool_call: (e) => socket.emit("chat:tool-call", e),
+            on_tool_result: (e) => socket.emit("chat:tool-result", e),
+            on_status: (text) => socket.emit("chat:status", { text }),
+            on_complete: (id) =>
+              socket.emit("chat:complete", { conversation_id: id }),
+            on_error: (msg) => socket.emit("chat:error", { message: msg }),
+          },
+        });
+      }
+    );
+  });
+}
+```
+
+**Rules:**
+
+- Socket.IO auth middleware runs on every connection — validate the Firebase token in `io.use()`, never inside the event handler
+- Emit events with a `chat:` namespace prefix to avoid collisions with Socket.IO system events
+- The emitters object passed to `run_chat_completion` is structurally identical — only the transport differs
+- Never call `socket.disconnect()` after `on_complete` — the client manages the connection lifecycle
+
+### Client: consuming Socket.IO in React Native (app)
+
+```ts
+// apps/app/src/hooks/use-chat-socket.ts
+import { io, Socket } from "socket.io-client";
+
+let socket: Socket | null = null;
+
+export function useChatSocket() {
+  const connect = async () => {
+    const token = await firebase_auth.currentUser?.getIdToken();
+
+    socket = io(process.env.EXPO_PUBLIC_AI_URL!, {
+      auth: { token }, // sent in handshake, verified by io.use()
+      transports: ["websocket"], // skip long-polling for mobile
+      reconnection: true,
+      reconnectionAttempts: 5,
+    });
+
+    socket.on("connect", () => console.log("socket connected"));
+    socket.on("disconnect", (r) => console.log("socket disconnected", r));
+    socket.on("connect_error", (e) => console.error("socket error", e.message));
+  };
+
+  const send_completion = (conversation_id: string, prompt: string) => {
+    socket?.emit("chat:completion", { conversation_id, prompt });
+  };
+
+  const subscribe = (handlers: {
+    on_validated?: (d: { conversation_id: string }) => void;
+    on_title?: (d: { title: string }) => void;
+    on_text_delta?: (d: { text: string }) => void;
+    on_thinking_delta?: (d: { text: string }) => void;
+    on_status?: (d: { text: string }) => void;
+    on_complete?: (d: { conversation_id: string }) => void;
+    on_error?: (d: { message: string }) => void;
+  }) => {
+    if (!socket) return;
+    socket.on("chat:validated", handlers.on_validated ?? (() => {}));
+    socket.on("chat:title", handlers.on_title ?? (() => {}));
+    socket.on("chat:text-delta", handlers.on_text_delta ?? (() => {}));
+    socket.on("chat:thinking-delta", handlers.on_thinking_delta ?? (() => {}));
+    socket.on("chat:status", handlers.on_status ?? (() => {}));
+    socket.on("chat:complete", handlers.on_complete ?? (() => {}));
+    socket.on("chat:error", handlers.on_error ?? (() => {}));
+  };
+
+  const disconnect = () => {
+    socket?.disconnect();
+    socket = null;
+  };
+
+  return { connect, send_completion, subscribe, disconnect };
+}
+```
+
+---
+
+## Event Reference
+
+Both transports emit the same logical events. The SSE event name maps directly to the Socket.IO event name with a `chat:` prefix.
+
+| SSE event name   | Socket.IO event name  | Payload shape                 |
+| ---------------- | --------------------- | ----------------------------- |
+| `title`          | `chat:title`          | `{ title: string }`           |
+| `text-delta`     | `chat:text-delta`     | `{ text: string }`            |
+| `thinking-delta` | `chat:thinking-delta` | `{ text: string }`            |
+| `tool-call`      | `chat:tool-call`      | `TToolCallEvent`              |
+| `tool-result`    | `chat:tool-result`    | `TToolResultEvent`            |
+| `status`         | `chat:status`         | `{ text: string }`            |
+| `complete`       | `chat:complete`       | `{ conversation_id: string }` |
+| `error`          | `chat:error`          | `{ message: string }`         |
 
 **Rule:** Never write SSE headers inside a service — only in the controller emitter callbacks.
 
@@ -75,6 +389,7 @@ Services live in `src/services/`. Never put LLM logic in controllers.
 ## Tools — Definition & Execution
 
 Each tool lives in its own folder under `src/tools/<tool-name>/`:
+
 - `definition.ts` — Zod `inputSchema` + `description` (no execute logic)
 - `execute.ts` — async execute function with full business logic
 
@@ -85,42 +400,51 @@ export const get_weather_definition = {
   inputSchema: z.object({
     location: z.string().describe("The location to get the weather for"),
   }),
-}
+};
 ```
 
 ```ts
 // src/tools/get-weather/execute.ts
 export const execute_get_weather = async (args: { location: string }) => {
   // fetch weather API, return structured result
-  return { temperature: "...", condition: "..." }
-}
+  return { temperature: "...", condition: "..." };
+};
 ```
 
 **Registration** in `src/tools/index.ts` via `create_tools(ctx)` factory:
 
 ```ts
 export const create_tools = (ctx: TToolContext) => ({
-  ...static_tools,                          // tools with no context deps
+  ...static_tools, // tools with no context deps
   handoff_to_agent: tool({
     ...handoff_to_agent_definition,
     execute: (args) => execute_handoff_to_agent(args, ctx),
   }),
   get_ledger_file: tool({
     ...get_ledger_file_definition,
-    execute: (args) => execute_get_ledger_file({ ...args, conversation: ctx.ledger_conversation_id }),
+    execute: (args) =>
+      execute_get_ledger_file({
+        ...args,
+        conversation: ctx.ledger_conversation_id,
+      }),
   }),
   // ...
-})
+});
 ```
 
 **`populate_tools`** — resolves the agent's requested tool names + always includes `PLATFORM_TOOLS`:
 
 ```ts
-export const populate_tools = (names: string[] | undefined, ctx: TToolContext): ToolSet => {
-  const all_tools = create_tools(ctx)
-  const tool_names = Array.from(new Set([...PLATFORM_TOOLS, ...(names ?? [])]))
-  return Object.fromEntries(tool_names.filter(n => n in all_tools).map(n => [n, all_tools[n]]))
-}
+export const populate_tools = (
+  names: string[] | undefined,
+  ctx: TToolContext
+): ToolSet => {
+  const all_tools = create_tools(ctx);
+  const tool_names = Array.from(new Set([...PLATFORM_TOOLS, ...(names ?? [])]));
+  return Object.fromEntries(
+    tool_names.filter((n) => n in all_tools).map((n) => [n, all_tools[n]])
+  );
+};
 ```
 
 **Tool execution in the agent loop:**
@@ -175,10 +499,11 @@ const results = await Promise.all(
 ```ts
 // src/services/agent-handoffs.ts
 export const get_agent_handoff_specialists = async (agent_id: string) =>
-  db.select({ id: agents.id, name: agents.name })
+  db
+    .select({ id: agents.id, name: agents.name })
     .from(agent_handoffs)
     .innerJoin(agents, eq(agent_handoffs.specialist, agents.id))
-    .where(eq(agent_handoffs.orchestrator, agent_id))
+    .where(eq(agent_handoffs.orchestrator, agent_id));
 ```
 
 ## Anthropic SDK Streaming
@@ -205,6 +530,7 @@ return { content: final.content, usage: { ... }, stop_reason: final.stop_reason 
 ## Environment
 
 Key env vars required in `src/constants/env.ts`:
+
 - `DATABASE_URL` — Neon connection string
 - `ANTHROPIC_API_KEY`
 - `FIREBASE_JSON_BASE64`

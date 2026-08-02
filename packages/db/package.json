@@ -8,6 +8,7 @@
     "./schema": "./src/schema/index.ts"
   },
   "scripts": {
+    "build": "tsc --noEmit",
     "check-types": "tsc --noEmit",
     "dev": "bun --env-file ../../.env drizzle-kit studio",
     "db:generate": "bun --env-file ../../.env drizzle-kit generate",

@@ -8,6 +8,12 @@ function requireEnv(value: string | undefined, key: string): string {
 // Use direct process.env.NEXT_PUBLIC_* access so Next.js can inline values in the browser bundle.
 export const env = {
   PORT: process.env.WEB_PORT ?? "3000",
+  NEXT_PUBLIC_APP_URL:
+    process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
+  NEXT_PUBLIC_API_URL: requireEnv(
+    process.env.NEXT_PUBLIC_API_URL,
+    "NEXT_PUBLIC_API_URL"
+  ),
   NEXT_PUBLIC_SUPABASE_URL: requireEnv(
     process.env.NEXT_PUBLIC_SUPABASE_URL,
     "NEXT_PUBLIC_SUPABASE_URL"

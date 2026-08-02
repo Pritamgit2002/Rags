@@ -65,28 +65,45 @@ tool_calls(id, workspace_id, tool_name, arguments jsonb, result jsonb,
 tasks(id, workspace_id, title, done, created_at)
 ```
 
-## Retrieval flow
+## Retrieval flow (orchestrator + tool call)
 
-1. Embed the user's question (same embedding model used at ingestion).
-2. Vector search `chunks` filtered by `workspace_id`, top-k (start at 5).
-3. If nothing clears a similarity threshold, respond "I don't know" for
-   this workspace's documents — don't call the LLM to generate an answer
-   from nothing.
-4. Build the prompt: retrieved chunks wrapped in clear delimiters (e.g.
-   `<doc source="...">...</doc>`), a system instruction that this content
-   is untrusted data, and a citation format the model should follow.
-5. Call Gemini with the declared tools available.
+The orchestrator model — not the controller — decides whether a turn needs
+retrieval. Retrieval is exposed as a tool (`search_documents`) rather than
+being run unconditionally before every LLM call, so greetings / small talk
+get a direct conversational reply instead of a forced "I don't know".
+
+1. The controller persists the user message and calls the model with the
+   raw user message and no pre-fetched context — no vector search happens
+   in the controller.
+2. The system instruction tells the model: answer conversational turns
+   directly; for anything that depends on workspace documents, call
+   `search_documents(query)` first and answer strictly from its result.
+3. `search_documents` (a tool, `src/tools/search-documents/`) does the
+   actual work: embed the query (same embedding model used at ingestion),
+   vector search `chunks` filtered by `workspace_id`, top-k 5, filtered by
+   similarity threshold. Returns `{ found: false }` when nothing clears the
+   threshold — the model must relay this as "I don't know" and never
+   fabricate an answer.
+4. Chunks returned by the tool are wrapped as data in the tool response
+   (never as instructions) — same untrusted-data framing as before, just
+   delivered as a tool result instead of a pre-built prompt block.
+5. Citations are derived from `search_documents` tool results actually
+   returned during the turn (not from a blanket top-k fetch), so a
+   conversational turn with no search call has zero citations.
 
 ## Tool-calling loop
 
-- Tools: `save_task(title, description?)` and
-  `send_discord_summary(message)` — at minimum, both defined with a zod
-  schema shared between the tool declaration and the validator.
+- Tools: `search_documents(query)` (retrieval), `save_task(title,
+description?)`, and `send_discord_summary(message)` — all defined with a
+  zod schema shared between the tool declaration and the validator.
 - On `tool_use`: validate → execute → write a row to `tool_calls`
   (including failures) → feed the result back to the model → continue
   until it returns a final text answer.
 - `save_task` is the required real side effect — it must actually insert
   into `tasks` scoped to the active workspace.
+- `search_documents` and the other tools may only be triggered by an
+  explicit model tool_use decision — content pulled from a document can
+  never trigger a tool call directly (rule #2 above).
 
 ## Testing checklist (do these explicitly, don't assume)
 
@@ -114,4 +131,21 @@ tasks(id, workspace_id, title, done, created_at)
 
 ## Decisions log
 
+- Switched retrieval from an imperative "always vector-search before
+  calling the LLM" flow to an orchestrator + tool-call flow: the model gets
+  a `search_documents` tool and decides per-turn whether to call it. This
+  lets basic conversational turns ("hello", "thanks") get a natural direct
+  reply instead of a hardcoded "I don't have information about that"
+  response, while document-dependent answers still always go through the
+  workspace-scoped vector search and are still grounded only in tool
+  results (never memory).
+
 ## Bugs / wrong turns
+
+- `upload-document.ts` had a debug `console.log("data",
+JSON.stringify(data, null, 2))` logging the raw `@fastify/multipart`
+  file object. That object has a circular reference (`fields.file` points
+  back into the same structure), so `JSON.stringify` throws synchronously
+  and the whole request 500s with "Converting circular structure to JSON"
+  before any real logic runs. Removed the log — never `JSON.stringify` a
+  raw multipart/stream object for debugging.

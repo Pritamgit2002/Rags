@@ -15,6 +15,27 @@
       "when": 1785618868129,
       "tag": "0001_chubby_aqueduct",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1785666345837,
+      "tag": "0002_real_viper",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1785679506505,
+      "tag": "0003_solid_shape",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1785681958091,
+      "tag": "0004_ambiguous_lethal_legion",
+      "breakpoints": true
     }
   ]
 }

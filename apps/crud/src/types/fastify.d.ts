@@ -2,7 +2,7 @@ import type { users } from "@repo/db";
 import "fastify";
 
 export type TSupabaseUser = {
-  supabase_uid: string;
+  id: string;
   email: string;
   name: string;
 };

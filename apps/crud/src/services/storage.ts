@@ -1,12 +1,10 @@
 import {
-  PutObjectCommand,
   GetObjectCommand,
-  DeleteObjectCommand,
-  ListObjectsV2Command,
   HeadObjectCommand,
+  ListObjectsV2Command,
 } from "@aws-sdk/client-s3";
 import { Readable } from "stream";
-import { r2 } from "@/lib/r2";
+import { delete_from_r2, r2, upload_to_r2 } from "@/lib/r2";
 import { env } from "@/constants/env";
 
 export async function listObjects(prefix?: string) {
@@ -25,15 +23,8 @@ export async function uploadObject(
   body: Buffer,
   contentType: string
 ) {
-  await r2.send(
-    new PutObjectCommand({
-      Bucket: env.R2_BUCKET_NAME,
-      Key: key,
-      Body: body,
-      ContentType: contentType,
-    })
-  );
-  return { key };
+  const storage_url = await upload_to_r2(key, body, contentType);
+  return { key, storage_url };
 }
 
 export async function getObject(key: string) {
@@ -59,7 +50,5 @@ export async function headObject(key: string) {
 }
 
 export async function deleteObject(key: string) {
-  await r2.send(
-    new DeleteObjectCommand({ Bucket: env.R2_BUCKET_NAME, Key: key })
-  );
+  await delete_from_r2(key);
 }

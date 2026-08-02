@@ -33,7 +33,7 @@ export const is_authenticated = async (
     let db_user = await db
       .select()
       .from(users)
-      .where(eq(users.supabase_uid, user.id))
+      .where(eq(users.id, user.id))
       .then((r) => r[0]);
 
     if (!db_user) {
@@ -42,11 +42,16 @@ export const is_authenticated = async (
         user.user_metadata?.name ??
         user.email ??
         "Unknown";
-      const email = user.email!;
+      const email = user.email;
+      if (!email) {
+        return reply
+          .status(401)
+          .send({ error: "User email is required", code: 401 });
+      }
 
       const [newUser] = await db
         .insert(users)
-        .values({ supabase_uid: user.id, name, email })
+        .values({ id: user.id, name, email })
         .returning();
 
       if (!newUser) {
@@ -59,9 +64,10 @@ export const is_authenticated = async (
     }
 
     req.user = db_user;
-  } catch {
+  } catch (err) {
+    req.log.error(err);
     return reply
-      .status(401)
-      .send({ error: "Invalid or expired token", code: 401 });
+      .status(500)
+      .send({ error: "Authentication failed", code: 500 });
   }
 };

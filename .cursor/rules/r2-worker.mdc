@@ -1,0 +1,187 @@
+---
+description: Cloudflare R2 storage patterns — client setup, upload/delete flow, key naming, file schema relations, Worker handoff, and what NOT to do
+alwaysApply: false
+---
+
+# Cloudflare R2 Storage Patterns
+
+## R2 Client (apps/crud/src/lib/r2.ts)
+
+The R2 client is an AWS S3-compatible `S3Client` pointed at the Cloudflare endpoint. **Only `apps/crud` owns the R2 client.** The copy in `apps/ai/src/lib/r2.ts` is dead code — never import or expand it.
+
+```ts
+export const r2 = new S3Client({
+  region: "auto",
+  endpoint: `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  credentials: {
+    accessKeyId: env.R2_ACCESS_KEY_ID,
+    secretAccessKey: env.R2_SECRET_ACCESS_KEY,
+  },
+});
+```
+
+Required env vars (all required except `R2_PUBLIC_URL`):
+
+- `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`
+- `R2_PUBLIC_URL` — optional; when set, `upload_to_r2` returns `${R2_PUBLIC_URL}/${key}` instead of a signed GET URL
+
+## Four R2 Helper Functions
+
+| Function                                                | Use when                                                                                  |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `upload_to_r2(key, buffer, content_type)`               | Uploading any file to R2 from the server                                                  |
+| `get_presigned_url(key, expires_in_seconds?)`           | Generating a time-limited GET URL (default 1h); only needed when `R2_PUBLIC_URL` is unset |
+| `delete_from_r2(key)`                                   | Permanently removing a file from R2                                                       |
+| `get_upload_presigned_url(key, content_type, expires?)` | **Do not use** — implemented but has zero callers; clients never upload directly to R2    |
+
+```ts
+// upload_to_r2 return value:
+// - if R2_PUBLIC_URL set  →  `${R2_PUBLIC_URL}/${key}` (permanent public URL)
+// - otherwise             →  presigned GET URL (1h expiry)
+// Always store the return value as storage_url in the files table
+const storage_url = await upload_to_r2(key, buffer, mimetype);
+```
+
+## Key Naming Convention
+
+```
+files/{user_id}/{uuid}-{original_filename}       ← all user file uploads
+support/{user_id}/{uuid}-{original_filename}     ← support ticket attachments
+```
+
+Always use `crypto.randomUUID()` as the UUID prefix. Never use the file's original name alone as the key (collision risk).
+
+```ts
+const key = `files/${req.user!.id}/${crypto.randomUUID()}-${originalname}`;
+```
+
+## Upload Flow (server-side multipart — never client-direct)
+
+Clients **never** upload directly to R2. All uploads go through the CRUD API:
+
+```
+Web useUploadFile
+  → POST /files/upload  (multipart/form-data, multer ≤50 MB)
+  → upload_file controller
+      1. req.file validated (multer puts buffer in memory)
+      2. get_file_type(mimetype)  → file_type enum or 400
+      3. key = `files/${user_id}/${uuid}-${name}`
+      4. storage_url = await upload_to_r2(key, buffer, mimetype)
+      5. INSERT into files table (.returning())
+      6. if pdf  → trigger_pdf_convert_processor(row)
+         if image → trigger_image_processor(row)
+      7. 201 { message, data: row }
+```
+
+Multer config in the file router:
+
+```ts
+const upload = multer({
+  storage: multer.memoryStorage(), // buffer, never disk
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB hard limit
+});
+router.post("/upload", upload.single("file"), upload_file);
+```
+
+Support ticket attachments use a separate multer config (5 MB, max 5 files) and store under the `support/` prefix — **not** in the `files` table.
+
+## Delete Flow
+
+Always delete from R2 **after** cascading DB deletes, not before. The DB is the source of truth.
+
+```ts
+// 1. Extract R2 key from storage_url (handles both public URL and presigned URL forms)
+const key = extract_r2_key(file.storage_url);
+
+// 2. Cascade delete all child rows first (order matters for FK constraints)
+await db
+  .delete(file_structured_chunks)
+  .where(eq(file_structured_chunks.file, file_id));
+await db.delete(file_extractions).where(eq(file_extractions.file, file_id));
+await db.delete(file_error_pages).where(eq(file_error_pages.file, file_id));
+await db
+  .delete(file_processing_logs)
+  .where(eq(file_processing_logs.file, file_id));
+await db.delete(files).where(eq(files.id, file_id));
+
+// 3. Then delete from R2
+await delete_from_r2(key);
+```
+
+`extract_r2_key` (in `src/helpers/file.ts`) strips either the public URL prefix or the bucket path prefix to recover the bare object key. Always use it — never try to parse `storage_url` manually.
+
+## File Schema & Relations (packages/db/src/schema/file.ts)
+
+```
+files
+  id, uploaded_by (→ users.id), name, storage_url, mime_type,
+  type (file_type_enum), size, status (file_status_enum),
+  total_pages_count, subject, standard, error, created_at, updated_at
+
+file_extractions          → file (→ files.id) + page_number + raw_content
+file_structured_chunks    → file + extraction + page_number + type + question data (jsonb)
+file_error_pages          → file + page_number + error + status (file_error_status_enum)
+file_processing_logs      → file + stage (extraction_stage_enum) + status + started_at / completed_at
+file_usage                → file + token counts + cost fields
+```
+
+`status` lifecycle:
+
+```
+uploaded → downloading → downloaded → extracting → extracted
+         → structuring → (structuring_failed | partially_completed | completed | failed)
+```
+
+Status is updated by the Cloudflare Worker, not by CRUD controllers directly.
+
+## Helpers
+
+```ts
+// src/helpers/file.ts
+
+// MIME → file_type_enum value; throws 400 on unsupported
+get_file_type(mime: string): "pdf" | "image" | "docx" | "csv" | "excel" | "video"
+
+// storage_url → R2 object key (handles public and presigned URL formats)
+extract_r2_key(storage_url: string): string
+```
+
+## Cloudflare Workers — consuming R2, not the R2 SDK
+
+The files in `apps/crud/src/cloudflare/` are **Cloudflare Workflow contracts + the Worker HTTP entry**, not R2 SDK usage. Workers receive `{ id, storage_url }` from CRUD and fetch the file via HTTPS (ConvertAPI or direct fetch). They do **not** import `@/lib/r2`.
+
+```ts
+// Triggering a Worker — only pass id + storage_url
+trigger_pdf_convert_processor(file); // → POST to PDF Worker with { id, storage_url }
+trigger_image_processor(file); // → POST to Image Worker with { id, storage_url }
+```
+
+Worker trigger functions live in `src/lib/pdf-convert-processor.ts` and `src/lib/image-processor.ts`. Only call them after a successful DB insert.
+
+## Frontend Hooks (apps/web/hooks/api/file.ts)
+
+```ts
+useGetAllFiles(options?)              // GET /files (no pagination, first page)
+useGetFiles(params, options?)         // GET /files with page/limit/search
+useUploadFile(options?)               // POST /files/upload — FormData with progress callback
+useDeleteFile(options?)               // DELETE /files/:id
+useProcessFile(options?)              // POST /files/:id/process (re-trigger Worker)
+```
+
+Upload hook uses `onUploadProgress` for a progress percentage — pass `onProgress` in payload:
+
+```ts
+const { mutate: upload } = useUploadFile({
+  onSuccess: () => invalidateQueries({ queryKey: ["getFiles"] }),
+});
+upload({ file: selectedFile, onProgress: (pct) => setProgress(pct) });
+```
+
+## What NOT to Do
+
+- Never import `r2` or R2 helpers from `apps/ai/src/lib/r2.ts` — use crud's lib only
+- Never call `get_upload_presigned_url` — clients never PUT directly to R2
+- Never delete from R2 before deleting child DB rows — FK constraints will fail
+- Never construct the R2 key from `storage_url` manually — use `extract_r2_key`
+- Never put `storage_url` in the support ticket `attachments` column as anything but the return value of `upload_to_r2`
+- Never add R2 logic to Cloudflare Workers (`cloudflare/` files) — Workers consume the public/presigned URL, not the SDK

@@ -1,6 +1,15 @@
 {
   "$schema": "https://turborepo.dev/schema.json",
   "ui": "tui",
+  "globalEnv": [
+    "DATABASE_URL",
+    "WEB_PORT",
+    "CRUD_PORT",
+    "NEXT_PUBLIC_API_URL",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "OPENAI_API_KEY",
+    "DISCORD_WEBHOOK_URL"
+  ],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
