@@ -1,0 +1,60 @@
+---
+description: Core architecture, naming conventions, and cross-app constraints for the examhell Turborepo monorepo
+alwaysApply: true
+---
+
+# Monorepo Architecture Rules
+
+## Package Manager & Tooling
+
+- **Always use `bun`** — never `npm` or `yarn` for installs or script execution
+- Run `bun run lint` and fix all errors before considering any task done
+- TypeScript everywhere — no `.js` files in `apps/`
+- Shared packages live in `packages/` — schema is in `packages/db`, not inside any app
+
+## Cross-App Architecture Constraints
+
+1. **`crud` owns all CRUD** — `web` and `ai` must only write/update data through `crud`'s REST API (except `ai` currently queries NeonDB directly for auth/user resolution — do not expand this pattern)
+2. **`ai` has no CRUD responsibilities** — AI features belong exclusively in `ai`
+3. **No AI logic in `crud`** — any Anthropic/OpenAI/LLM usage belongs in `ai`
+4. **Firebase is the identity layer** — both servers verify Firebase ID tokens on every authenticated request
+5. **`web` talks to both servers** — CRUD resources via Axios → `NEXT_PUBLIC_API_URL`, AI chat via raw `fetch` SSE → `NEXT_PUBLIC_AI_URL`
+
+## Naming Conventions
+
+### Backend (crud, ai)
+
+| thing | convention | example |
+|---|---|---|
+| file names | kebab-case | `create-exam.ts`, `is-authenticated.ts` |
+| folder names | kebab-case | `controllers/`, `middleware/` |
+| variables | snake_case | `user_id`, `conversation_id` |
+| functions | snake_case | `get_exams()`, `run_agent_loop()` |
+| types / interfaces | TPascalCase | `TUser`, `TToolContext` |
+| env variables | SCREAMING_SNAKE_CASE | `DATABASE_URL`, `ANTHROPIC_API_KEY` |
+| exported routers | `*_router` suffix | `exam_router`, `chat_router` |
+| exported middleware | descriptive snake_case | `is_authenticated`, `verify_token` |
+| exported controllers | verb_noun snake_case | `create_exam`, `get_exams`, `delete_exam` |
+
+### Frontend (web)
+
+| thing | convention | example |
+|---|---|---|
+| files | kebab-case | `exam-form.tsx`, `use-chat.ts` |
+| variables / functions | camelCase | `examId`, `getAllExams()` |
+| hooks | `use` prefix camelCase | `useGetAllExams`, `useCreateExam` |
+| components | PascalCase | `MainContainer`, `MessageList` |
+
+## Shared Packages
+
+- `@examhell/db` — Drizzle ORM client factory + all schema; import `createDb` and schema tables from here
+- `@examhell/ui` — shared Shadcn/Radix primitives; never recreate UI primitives locally
+- `@examhell/types` — shared TypeScript types
+- DB client in each server: `import { createDb } from "@examhell/db"` → `export const db = createDb(env.DATABASE_URL)`
+
+## Error Response Shapes
+
+- **Auth middleware failures** (401/403): `{ error: string, code: number }`
+- **Controller / AppError path**: `{ message: string, data: null }`
+- **Success**: `{ message: string, data: T, pagination?: TPaginationResponse }`
+- Never mix these shapes — middleware uses `error`, controllers use `message`

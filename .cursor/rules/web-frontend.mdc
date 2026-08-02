@@ -1,0 +1,218 @@
+---
+description: Patterns for API hooks, components, auth, TanStack Query, routing, and state in apps/web
+globs: apps/web/**
+alwaysApply: false
+---
+
+# Web Frontend Patterns (apps/web)
+
+## Project Layout
+
+No `src/` directory — all paths resolve from `app/` root via `@/` alias.
+
+```
+app/
+  (auth)/           → public routes (login, verify-otp)
+  (private)/        → authenticated + sidebar (dashboard, admin/, teacher/, student/)
+  (exam)/           → authenticated, no sidebar (exam-portal/[id]/)
+components/         → shared UI shells (not primitives — those are @examhell/ui)
+hooks/
+  api/              → one file per resource
+  custom/           → use-chat, use-debounce, use-query-params, …
+lib/                → api.ts, firebase.ts, tanstack.ts, dayjs.ts
+providers/          → AuthProvider, QueryProvider, ArtifactPanelProvider, AppProviders
+types/              → api.ts, tanstack.ts, models/
+constants/          → env.ts, common.ts
+config/             → navigation.ts, data-table.ts
+```
+
+## API Hooks (hooks/api/)
+
+One file per resource. Pattern: plain async function → `api.*` (Axios) → wrapped in `useQuery` / `useMutation`.
+
+**Types** (from `types/api.ts` and `types/tanstack.ts`):
+
+```ts
+type TApiPromise<TData = undefined> = Promise<TApiSuccess<TData>> | Promise<TApiError>
+type TApiSuccess<TData = undefined> = { message: string; data?: TData; pagination?: TPaginationResponse }
+type TApiError = { message: string; status_code: number }
+
+type TQueryOpts<TResponse, TSelect = TApiSuccess<TResponse>> =
+  Omit<UseQueryOptions<TApiSuccess<TResponse>, TApiError, TSelect>, "queryKey" | "queryFn">
+
+type TMutationOpts<TVariables = void, TResponse = undefined> =
+  Omit<UseMutationOptions<TApiSuccess<TResponse>, TApiError, TVariables>, "mutationKey" | "mutationFn">
+```
+
+**Full CRUD hook file pattern:**
+
+```ts
+// hooks/api/exam.ts
+
+// Query function (plain async)
+const getAllExams = (params: TGetAllExamsParams): TApiPromise<TExam[]> =>
+  api.get("/exams", { params })
+
+// useQuery hook
+export const useGetAllExams = (
+  params: TGetAllExamsParams,
+  options?: TQueryOpts<TExam[]>
+) =>
+  useQuery({
+    queryKey: ["useGetAllExams", params],    // key = hook name + params
+    queryFn: () => getAllExams(params),
+    ...options,
+  })
+
+// Mutation function
+const createExam = (exam: TCreateExamPayload): TApiPromise<TExam> =>
+  api.post("/exams", exam)
+
+// useMutation hook
+export const useCreateExam = (options?: TMutationOpts<TCreateExamPayload, TExam>) =>
+  useMutation({
+    mutationKey: ["useCreateExam"],
+    mutationFn: createExam,
+    ...options,
+  })
+```
+
+**Rules:**
+- Query keys are always `[hookName, ...params]` — name the key after the hook exactly
+- Accept optional `TQueryOpts` / `TMutationOpts` — callers pass `onSuccess`, `onError`, `enabled` etc.
+- Never call `invalidateQueries` inside a hook — callers handle cache invalidation in `onSuccess`
+- All hooks are named exports — no default exports
+
+## Axios API Client (lib/api.ts)
+
+```ts
+const api = axios.create({
+  baseURL: env.NEXT_PUBLIC_API_URL,
+  headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" },
+})
+
+// Request interceptor — attach Firebase ID token automatically
+api.interceptors.request.use(async (config) => {
+  const idToken = auth.currentUser ? await getIdToken(auth.currentUser) : null
+  if (idToken && !config.headers.Authorization) config.headers.Authorization = `Bearer ${idToken}`
+  return config
+})
+
+// Response interceptor — unwrap to { message, data, pagination }
+api.interceptors.response.use(
+  (res) => res.data,
+  (err: AxiosError) => Promise.reject(err?.response?.data)
+)
+```
+
+AI chat uses **raw `fetch`** with SSE — never Axios for streaming endpoints:
+
+```ts
+const res = await fetch(`${env.NEXT_PUBLIC_AI_URL}/chats/${conversationId}/completion`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+  body: JSON.stringify({ prompt, user_files: files }),
+})
+// read as ReadableStream and parse SSE manually in use-chat.ts
+```
+
+## TanStack Query Config (lib/tanstack.ts)
+
+```ts
+export const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: { retry: 0, staleTime: 3000, refetchOnWindowFocus: false },
+  },
+})
+export const invalidateQueries = (filters?: InvalidateQueryFilters) =>
+  queryClient.invalidateQueries(filters)
+```
+
+Use `invalidateQueries({ queryKey: ["useGetAllExams"] })` in mutation `onSuccess` to refresh lists.
+
+## Firebase Auth (lib/firebase.ts + providers/auth-provider.tsx)
+
+```ts
+// lib/firebase.ts
+const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig)
+export const auth = getAuth(app)
+```
+
+**AuthProvider** syncs Firebase user → DB on every auth state change:
+
+```ts
+// On login: POST /auth/sync with Bearer token → get TSession + is_new flag
+const syncUserToDB = async (firebase_user: User) => {
+  const token = await firebase_user.getIdToken()
+  const res = await fetch(`${env.NEXT_PUBLIC_API_URL}/auth/sync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ role: localStorage.getItem("active_role") ?? "student" }),
+  })
+  // setSession(), setIsNewUser(), then force-refresh token for custom claims
+  const claims = await firebase_user.getIdTokenResult(true)
+  setRole(claims.claims.role as UserRole)
+}
+```
+
+Auth state available via `useAuth()` hook — never read `auth.currentUser` directly in components.
+
+## Route Protection
+
+```ts
+// app/(private)/layout.tsx
+const { user, isLoading } = useAuth()
+useEffect(() => {
+  if (!isLoading && !user) router.push("/login")
+}, [user, isLoading, router])
+if (isLoading || !user) return <Spinner />
+```
+
+Role-based navigation defined in `config/navigation.ts` (`teacherNavItems`, `studentNavItems`, `adminNavItems`). Never hardcode nav items in components.
+
+## Components
+
+- **Shared shells** live in `components/` — `MainContainer`, `DataTable`, `AppSidebar`
+- **Feature components** are co-located under their route folder
+- **UI primitives** come from `@examhell/ui` — never recreate Shadcn/Radix locally
+- Use `MainContainer` for all private pages — it provides breadcrumb + scroll area
+
+```tsx
+// Typical page structure
+export default function ExamsPage() {
+  const { data, isLoading } = useGetAllExams({ page: 1, limit: 20 })
+  return (
+    <MainContainer breadcrumbItems={[{ label: "Exams" }]}>
+      {isLoading ? <Spinner /> : <DataTable columns={columns} data={data?.data ?? []} />}
+    </MainContainer>
+  )
+}
+```
+
+## Date Formatting
+
+Always use `src/lib/dayjs.ts` for dates — never `new Date().toLocaleDateString()` or raw `Date` formatting.
+
+## State Management
+
+| type | tool |
+|---|---|
+| Server / async data | TanStack Query |
+| Global app state | React Context (`AuthProvider`, `ArtifactPanelProvider`) |
+| URL / filter state | `useQueryParams` (nuqs) |
+| Local UI state | `useState` |
+| Persistent user prefs | `localStorage` (active_role, redirect-url) |
+
+**Do not use `useMemo` or `useCallback`** — the React Compiler handles memoization automatically.
+
+## Environment Variables (constants/env.ts)
+
+```ts
+export const env = {
+  NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL || "NA",
+  NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL || "NA",   // crud server
+  NEXT_PUBLIC_AI_URL:  process.env.NEXT_PUBLIC_AI_URL  || "NA",   // ai server
+}
+```
+
+Always read env via `env.*` — never `process.env.*` inline in components.
