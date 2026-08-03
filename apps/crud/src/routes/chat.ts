@@ -1,4 +1,5 @@
-import { get_chat_messages, send_chat_message } from "@/controllers/chat/chat";
+import { get_chat_messages } from "@/controllers/chat/get-chat";
+import { send_chat_message } from "@/controllers/chat/send-chat";
 import { stream_chat_message } from "@/controllers/chat/chat-stream";
 import { is_authenticated } from "@/middleware/is-authenticated";
 import { FastifyInstance } from "fastify";
