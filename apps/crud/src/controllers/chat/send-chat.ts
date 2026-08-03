@@ -3,7 +3,7 @@ import { z } from "zod";
 import { get_owned_workspace } from "@/services/workspace-access";
 import { db } from "@/lib/drizzle";
 import { chat_messages } from "@repo/db";
-import { rag_chat } from "@/lib/rag-chat";
+import { chat_completion } from "@/lib/chat-completion";
 
 export const send_chat_message = async (
   req: FastifyRequest,
@@ -33,16 +33,17 @@ export const send_chat_message = async (
   try {
     // Retrieval is not forced up front — the orchestrator decides whether
     // this turn is conversational or needs grounding via the
-    // search_documents tool call (see SYSTEM_INSTRUCTION in rag-chat.ts).
-    const chat_result = await rag_chat(message, workspaceId);
+    // search_documents tool call (see SYSTEM_INSTRUCTION in chat-completion.ts).
+
+    const chat_result = await chat_completion(message, workspaceId);
 
     const assistant_msg_rows = await db
       .insert(chat_messages)
       .values({
         workspace_id: workspaceId,
         role: "assistant",
-        content: chat_result.text,
-        citations: chat_result.citations,
+        content: chat_result?.text ?? "hello: Demo Response",
+        citations: chat_result?.citations ?? [],
       })
       .returning();
     const assistant_msg = assistant_msg_rows[0];
@@ -52,7 +53,7 @@ export const send_chat_message = async (
       data: {
         userMessageId: user_msg.id,
         message: assistant_msg,
-        tool_calls_made: chat_result.tool_calls_made,
+        tool_calls_made: chat_result?.tool_calls_made ?? [],
       },
     });
   } catch (err) {

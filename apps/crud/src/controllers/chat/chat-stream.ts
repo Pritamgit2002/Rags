@@ -1,9 +1,9 @@
-import { rag_chat_stream } from "@/lib/rag-chat";
 import { db } from "@/lib/drizzle";
 import { chat_messages } from "@repo/db";
 import { get_owned_workspace } from "@/services/workspace-access";
 import { FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { chat_completion_stream } from "@/lib/chat-completion";
 
 export const stream_chat_message = async (
   req: FastifyRequest,
@@ -72,7 +72,7 @@ export const stream_chat_message = async (
     // Retrieval is not forced up front — the orchestrator decides whether
     // this turn is conversational or needs grounding via the
     // search_documents tool call (see SYSTEM_INSTRUCTION in rag-chat.ts).
-    const chat_result = await rag_chat_stream(message, workspaceId, {
+    const chat_result = await chat_completion_stream(message, workspaceId, {
       on_status: (text) => send("status", { text }),
       on_text_delta: (text) => send("text-delta", { text }),
       on_tool_call_event: (tool_name, args) =>
@@ -86,8 +86,8 @@ export const stream_chat_message = async (
       .values({
         workspace_id: workspaceId,
         role: "assistant",
-        content: chat_result.text,
-        citations: chat_result.citations,
+        content: chat_result?.text ?? "hello: Demo Response",
+        citations: chat_result?.citations ?? [],
       })
       .returning();
 
