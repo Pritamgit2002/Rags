@@ -1,8 +1,7 @@
-import { env } from "@/constants/env";
-import { build_raw_content_prompt } from "@/lib/prompt/raw-content";
-import { create_openai_client } from "@/lib/openai-client";
+import { generateText } from "ai";
 
-const VISION_MODEL_ID = "gpt-5-mini" as const;
+import { VISION_MODEL } from "@/lib/ai-model";
+import { build_raw_content_prompt } from "@/lib/prompt/raw-content";
 
 function is_ocr_refusal(text: string): boolean {
   const normalized = text.toLowerCase();
@@ -49,34 +48,31 @@ function build_ocr_instructions(
 export async function extract_raw_content(
   page_base64: string,
   page_number: number,
-  api_key: string = env.OPENAI_API_KEY,
   image_mime: "image/jpeg" | "image/png" = "image/png",
   mode: "full" | "fallback" = "full"
 ): Promise<string> {
-  const client = create_openai_client(api_key);
   const instructions = build_ocr_instructions(page_number, mode);
 
-  const response = await client.chat.completions.create({
-    model: VISION_MODEL_ID,
+  const { text } = await generateText({
+    model: VISION_MODEL,
     temperature: 0,
-    max_tokens: 8_192,
+    maxOutputTokens: 8_192,
     messages: [
       {
         role: "user",
         content: [
           { type: "text", text: instructions },
           {
-            type: "image_url",
-            image_url: {
-              url: `data:${image_mime};base64,${page_base64}`,
-            },
+            type: "image",
+            image: Buffer.from(page_base64, "base64"),
+            mediaType: image_mime,
           },
         ],
       },
     ],
   });
 
-  const trimmed = response.choices[0]?.message?.content?.trim();
+  const trimmed = text.trim();
   if (!trimmed) {
     throw new Error(`Model returned empty content for page ${page_number}`);
   }
@@ -95,7 +91,6 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 export async function extract_raw_content_with_retry(
   page_base64: string,
   page_number: number,
-  api_key: string = env.OPENAI_API_KEY,
   image_mime: "image/jpeg" | "image/png" = "image/png",
   max_attempts = 3
 ): Promise<string> {
@@ -107,7 +102,6 @@ export async function extract_raw_content_with_retry(
       return await extract_raw_content(
         page_base64,
         page_number,
-        api_key,
         image_mime,
         mode
       );

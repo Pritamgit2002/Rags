@@ -1,7 +1,6 @@
 import { rag_chat } from "@/lib/rag-chat";
 import { db } from "@/lib/drizzle";
 import { chat_messages } from "@repo/db";
-import { execute_tool_call } from "@/services/tool-executor";
 import { get_owned_workspace } from "@/services/workspace-access";
 import { eq } from "drizzle-orm";
 import { FastifyReply, FastifyRequest } from "fastify";
@@ -64,9 +63,7 @@ export const send_chat_message = async (
     // Retrieval is not forced up front — the orchestrator decides whether
     // this turn is conversational or needs grounding via the
     // search_documents tool call (see SYSTEM_INSTRUCTION in rag-chat.ts).
-    const chat_result = await rag_chat(message, async (tool_name, args) =>
-      execute_tool_call(tool_name, args, workspaceId)
-    );
+    const chat_result = await rag_chat(message, workspaceId);
 
     const assistant_msg_rows = await db
       .insert(chat_messages)

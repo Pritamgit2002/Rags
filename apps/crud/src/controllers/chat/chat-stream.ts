@@ -1,7 +1,6 @@
 import { rag_chat_stream } from "@/lib/rag-chat";
 import { db } from "@/lib/drizzle";
 import { chat_messages } from "@repo/db";
-import { execute_tool_call } from "@/services/tool-executor";
 import { get_owned_workspace } from "@/services/workspace-access";
 import { FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -19,12 +18,10 @@ export const stream_chat_message = async (
 
   const parsed = z_stream_chat_body.safeParse(req.body);
   if (!parsed.success) {
-    return reply
-      .status(400)
-      .send({
-        message: parsed.error.issues[0]?.message ?? "Bad request",
-        data: null,
-      });
+    return reply.status(400).send({
+      message: parsed.error.issues[0]?.message ?? "Bad request",
+      data: null,
+    });
   }
 
   const { message, workspaceId } = parsed.data;
@@ -75,18 +72,14 @@ export const stream_chat_message = async (
     // Retrieval is not forced up front — the orchestrator decides whether
     // this turn is conversational or needs grounding via the
     // search_documents tool call (see SYSTEM_INSTRUCTION in rag-chat.ts).
-    const chat_result = await rag_chat_stream(
-      message,
-      (tool_name, args) => execute_tool_call(tool_name, args, workspaceId),
-      {
-        on_status: (text) => send("status", { text }),
-        on_text_delta: (text) => send("text-delta", { text }),
-        on_tool_call_event: (tool_name, args) =>
-          send("tool-call", { tool_name, arguments: args }),
-        on_tool_result_event: (tool_name, result) =>
-          send("tool-result", { tool_name, result }),
-      }
-    );
+    const chat_result = await rag_chat_stream(message, workspaceId, {
+      on_status: (text) => send("status", { text }),
+      on_text_delta: (text) => send("text-delta", { text }),
+      on_tool_call_event: (tool_name, args) =>
+        send("tool-call", { tool_name, arguments: args }),
+      on_tool_result_event: (tool_name, result) =>
+        send("tool-result", { tool_name, result }),
+    });
 
     const [assistant_msg] = await db
       .insert(chat_messages)

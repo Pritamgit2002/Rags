@@ -1,16 +1,19 @@
-import { create_openai_client } from "@/lib/openai-client";
+import { embed } from "ai";
 
-const EMBEDDING_MODEL = "text-embedding-3-small";
+import { EMBED_MODEL } from "@/lib/ai-model";
+
+/** Must match the vector(768) column in the chunks table. */
 const EMBEDDING_DIMENSIONS = 768;
 
 export async function embed_text(text: string): Promise<number[]> {
-  const response = await create_openai_client().embeddings.create({
-    model: EMBEDDING_MODEL,
-    input: text,
-    dimensions: EMBEDDING_DIMENSIONS,
+  const { embedding } = await embed({
+    model: EMBED_MODEL,
+    value: text,
+    // Dimensions are a provider-level option so switching EMBED_MODEL to a
+    // different provider only requires updating ai-model.ts + this key name.
+    providerOptions: { openai: { dimensions: EMBEDDING_DIMENSIONS } },
   });
 
-  const embedding = response.data[0]?.embedding;
   if (!embedding?.length) {
     throw new Error("Embedding model returned empty vector");
   }

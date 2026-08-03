@@ -1,64 +1,98 @@
-import type { ChatCompletionTool } from "openai/resources/chat/completions";
-import type { ZodType } from "zod";
+import { tool } from "ai";
 
-import { save_task_declaration, z_save_task } from "./save-task/definition";
-import { execute_save_task } from "./save-task/execute";
+import { db } from "@/lib/drizzle";
+import { tool_calls } from "@repo/db";
+
 import {
-  send_discord_declaration,
-  z_send_discord,
-} from "./send-discord-summary/definition";
-import { execute_send_discord } from "./send-discord-summary/execute";
-import {
-  search_documents_declaration,
+  SEARCH_DOCUMENTS_DESCRIPTION,
   z_search_documents,
 } from "./search-documents/definition";
 import { execute_search_documents } from "./search-documents/execute";
+import { SAVE_TASK_DESCRIPTION, z_save_task } from "./save-task/definition";
+import { execute_save_task } from "./save-task/execute";
+import {
+  SEND_DISCORD_DESCRIPTION,
+  z_send_discord,
+} from "./send-discord-summary/definition";
+import { execute_send_discord } from "./send-discord-summary/execute";
 
 export type TToolContext = {
   workspace_id: string;
 };
 
-type TTool = {
-  declaration: ChatCompletionTool;
-  schema: ZodType<unknown>;
-  execute: (args: unknown) => Promise<Record<string, unknown>>;
-};
+/**
+ * Wraps a tool's execute function with DB logging so every invocation —
+ * success or failure — is recorded in the `tool_calls` table.
+ * Never throws: failures are returned as `{ error }` objects so the model
+ * receives a structured error result rather than a crash.
+ */
+async function with_db_logging(
+  tool_name: string,
+  workspace_id: string,
+  input: Record<string, unknown>,
+  fn: () => Promise<Record<string, unknown>>
+): Promise<Record<string, unknown>> {
+  let result: Record<string, unknown>;
+  let status: "success" | "error" = "success";
 
-export type TToolMap = Record<string, TTool>;
+  try {
+    result = await fn();
+  } catch (err) {
+    status = "error";
+    result = { error: err instanceof Error ? err.message : String(err) };
+  }
 
-export function create_tools(ctx: TToolContext): TToolMap {
-  return {
-    search_documents: {
-      declaration: search_documents_declaration,
-      schema: z_search_documents,
-      execute: async (args) => {
-        const parsed = z_search_documents.parse(args);
-        return execute_search_documents(parsed, ctx.workspace_id);
-      },
-    },
+  await db
+    .insert(tool_calls)
+    .values({ workspace_id, tool_name, arguments: input, result, status })
+    .catch((e) => console.error("[tools] failed to log tool call", e));
 
-    save_task: {
-      declaration: save_task_declaration,
-      schema: z_save_task,
-      execute: async (args) => {
-        const parsed = z_save_task.parse(args);
-        return execute_save_task(parsed, ctx.workspace_id);
-      },
-    },
-
-    send_discord_summary: {
-      declaration: send_discord_declaration,
-      schema: z_send_discord,
-      execute: async (args) => {
-        const parsed = z_send_discord.parse(args);
-        return execute_send_discord(parsed);
-      },
-    },
-  };
+  return result;
 }
 
-export const TOOL_DECLARATIONS: ChatCompletionTool[] = [
-  search_documents_declaration,
-  save_task_declaration,
-  send_discord_declaration,
-];
+/**
+ * Builds the AI SDK tool set scoped to a workspace.
+ *
+ * Each entry uses Vercel AI SDK's `tool()` helper — the Zod `inputSchema`
+ * is provider-agnostic, so switching the underlying LLM in
+ * `src/lib/ai-model.ts` requires zero changes here.
+ */
+export function create_tools(ctx: TToolContext) {
+  return {
+    search_documents: tool({
+      description: SEARCH_DOCUMENTS_DESCRIPTION,
+      inputSchema: z_search_documents,
+      execute: (input, _options) =>
+        with_db_logging(
+          "search_documents",
+          ctx.workspace_id,
+          input as Record<string, unknown>,
+          () => execute_search_documents(input, ctx.workspace_id)
+        ),
+    }),
+
+    save_task: tool({
+      description: SAVE_TASK_DESCRIPTION,
+      inputSchema: z_save_task,
+      execute: (input, _options) =>
+        with_db_logging(
+          "save_task",
+          ctx.workspace_id,
+          input as Record<string, unknown>,
+          () => execute_save_task(input, ctx.workspace_id)
+        ),
+    }),
+
+    send_discord_summary: tool({
+      description: SEND_DISCORD_DESCRIPTION,
+      inputSchema: z_send_discord,
+      execute: (input, _options) =>
+        with_db_logging(
+          "send_discord_summary",
+          ctx.workspace_id,
+          input as Record<string, unknown>,
+          () => execute_send_discord(input)
+        ),
+    }),
+  };
+}
