@@ -29,6 +29,7 @@ export default function Dashboard({
   const [chatInput, setChatInput] = useState("");
   const chatEndRef = useRef<HTMLDivElement>(null);
   const [uploadQueue, setUploadQueue] = useState(0);
+  const [localUserMessage, setLocalUserMessage] = useState<string | null>(null);
 
   const {
     is_streaming,
@@ -55,6 +56,7 @@ export default function Dashboard({
   useEffect(() => {
     abort();
     reset_stream();
+    setLocalUserMessage(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeWs]);
 
@@ -108,19 +110,24 @@ export default function Dashboard({
 
     const msg = chatInput.trim();
     setChatInput("");
+    setLocalUserMessage(msg);
 
     stream_chat(
       activeWs,
       msg,
-      () => {
-        // On stream complete: refresh persisted data
-        refetch_chat();
-        refetch_tool_calls();
-        refetch_tasks();
+      async () => {
+        await Promise.all([
+          refetch_chat(),
+          refetch_tool_calls(),
+          refetch_tasks(),
+        ]);
+        // Clear local bubble only after persisted data is loaded so there's no flash
+        setLocalUserMessage(null);
         reset_stream();
       },
       (err) => {
         console.error("Stream error:", err);
+        setLocalUserMessage(null);
       }
     );
   }
@@ -140,16 +147,33 @@ export default function Dashboard({
   const uploading = uploadQueue > 0;
   const creatingWs = createWorkspaceMutation.isPending;
 
-  // When streaming, show persisted messages + a live "assistant" bubble
+  // Only show the local user bubble if it hasn't been persisted yet (dedup by content)
+  const lastPersistedUserMsg = [...persistedMessages]
+    .reverse()
+    .find((m) => m.role === "user");
+  const showLocalUser =
+    localUserMessage !== null &&
+    lastPersistedUserMsg?.content !== localUserMessage;
+
   const displayMessages: Array<
-    TChatMessage | { id: string; role: "streaming" }
-  > =
-    is_streaming || streaming_text
+    | TChatMessage
+    | { id: string; role: "streaming" }
+    | { id: string; role: "local_user"; content: string }
+  > = [
+    ...persistedMessages,
+    ...(showLocalUser
       ? [
-          ...persistedMessages,
-          { id: "__streaming__", role: "streaming" } as const,
+          {
+            id: "__local_user__",
+            role: "local_user" as const,
+            content: localUserMessage!,
+          },
         ]
-      : persistedMessages;
+      : []),
+    ...(is_streaming || streaming_text
+      ? [{ id: "__streaming__", role: "streaming" as const }]
+      : []),
+  ];
 
   return (
     <div className="flex h-screen flex-col bg-gray-50 dark:bg-gray-950">
@@ -297,7 +321,7 @@ export default function Dashboard({
 
                 {/* Persisted messages */}
                 {displayMessages.map((msg) => {
-                  if ("role" in msg && msg.role === "streaming") {
+                  if (msg.role === "streaming") {
                     return (
                       <StreamingBubble
                         key="__streaming__"
@@ -306,6 +330,16 @@ export default function Dashboard({
                         tool_calls={live_tool_calls}
                         is_streaming={is_streaming}
                       />
+                    );
+                  }
+
+                  if (msg.role === "local_user") {
+                    return (
+                      <div key="__local_user__" className="flex justify-end">
+                        <div className="max-w-[75%] rounded-2xl px-4 py-2.5 text-sm bg-indigo-600 text-white">
+                          <p className="whitespace-pre-wrap">{msg.content}</p>
+                        </div>
+                      </div>
                     );
                   }
 
