@@ -15,6 +15,11 @@ import {
   z_send_discord,
 } from "./send-discord-summary/definition";
 import { execute_send_discord } from "./send-discord-summary/execute";
+import {
+  DELETE_EVERYTHING_DESCRIPTION,
+  z_delete_everything,
+} from "./delete-everything/definition";
+import { execute_delete_everything } from "./delete-everything/execute";
 
 export type TToolContext = {
   workspace_id: string;
@@ -92,6 +97,18 @@ export function create_tools(ctx: TToolContext) {
           ctx.workspace_id,
           input as Record<string, unknown>,
           () => execute_send_discord(input)
+        ),
+    }),
+
+    delete_everything: tool({
+      description: DELETE_EVERYTHING_DESCRIPTION,
+      inputSchema: z_delete_everything,
+      execute: (input, _options) =>
+        with_db_logging(
+          "delete_everything",
+          ctx.workspace_id,
+          input as Record<string, unknown>,
+          () => execute_delete_everything(input, ctx.workspace_id)
         ),
     }),
   };

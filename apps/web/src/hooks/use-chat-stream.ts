@@ -16,6 +16,8 @@ export type TChatStreamState = {
   tool_calls: TStreamToolCall[];
   tool_results: TStreamToolResult[];
   error: string | null;
+  /** Set to true when the model calls delete_everything — triggers the native dialog */
+  delete_confirmation_pending: boolean;
 };
 
 const INITIAL: TChatStreamState = {
@@ -25,6 +27,7 @@ const INITIAL: TChatStreamState = {
   tool_calls: [],
   tool_results: [],
   error: null,
+  delete_confirmation_pending: false,
 };
 
 export function useChatStream() {
@@ -40,7 +43,12 @@ export function useChatStream() {
     // Cancel any previous in-flight stream
     abort_ref.current?.abort();
 
-    setState({ ...INITIAL, is_streaming: true });
+    setState((s) => ({
+      ...INITIAL,
+      is_streaming: true,
+      // Preserve dialog if it was already open when a new message is sent
+      delete_confirmation_pending: s.delete_confirmation_pending,
+    }));
 
     const supabase = createClient();
     const {
@@ -150,6 +158,15 @@ export function useChatStream() {
                     result: data["result"],
                   },
                 ],
+                // Detect delete_everything confirmation request
+                delete_confirmation_pending:
+                  s.delete_confirmation_pending ||
+                  (data["tool_name"] === "delete_everything" &&
+                    typeof data["result"] === "object" &&
+                    data["result"] !== null &&
+                    (data["result"] as Record<string, unknown>)[
+                      "needs_confirmation"
+                    ] === true),
               }));
               break;
 
@@ -186,7 +203,15 @@ export function useChatStream() {
     setState((s) => ({ ...s, is_streaming: false, status: null }));
   };
 
-  const reset = () => setState(INITIAL);
+  const reset = () =>
+    setState((s) => ({
+      ...INITIAL,
+      // Keep dialog open if it was triggered during this stream
+      delete_confirmation_pending: s.delete_confirmation_pending,
+    }));
 
-  return { ...state, stream_chat, abort, reset };
+  const dismiss_delete_confirmation = () =>
+    setState((s) => ({ ...s, delete_confirmation_pending: false }));
+
+  return { ...state, stream_chat, abort, reset, dismiss_delete_confirmation };
 }

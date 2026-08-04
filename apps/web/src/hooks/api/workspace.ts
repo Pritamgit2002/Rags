@@ -39,3 +39,15 @@ export const useDeleteWorkspace = (
     mutationFn: deleteWorkspace,
     ...options,
   });
+
+const deleteWorkspaceEverything = (id: string): TApiPromise<void> =>
+  api.delete(`/workspaces/${id}/everything`);
+
+export const useDeleteWorkspaceEverything = (
+  options?: TMutationOpts<string, void>
+) =>
+  useMutation({
+    mutationKey: ["useDeleteWorkspaceEverything"],
+    mutationFn: deleteWorkspaceEverything,
+    ...options,
+  });

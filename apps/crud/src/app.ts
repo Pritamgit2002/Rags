@@ -19,7 +19,11 @@ export const buildApp = () => {
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
 
-  app.register(cors, { origin: true });
+  app.register(cors, {
+    origin: true,
+    credentials: true,
+    methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+  });
   app.register(multipart, {
     limits: { fileSize: 50 * 1024 * 1024 },
   });

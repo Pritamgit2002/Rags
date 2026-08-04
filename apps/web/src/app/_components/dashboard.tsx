@@ -5,7 +5,11 @@ import { useGetChatMessages } from "@/hooks/api/chat";
 import { useGetDocuments, useUploadDocument } from "@/hooks/api/document";
 import { useGetTasks } from "@/hooks/api/task";
 import { useGetToolCalls } from "@/hooks/api/tool-call";
-import { useCreateWorkspace, useGetWorkspaces } from "@/hooks/api/workspace";
+import {
+  useCreateWorkspace,
+  useDeleteWorkspaceEverything,
+  useGetWorkspaces,
+} from "@/hooks/api/workspace";
 import { useChatStream } from "@/hooks/use-chat-stream";
 import { invalidateQueries } from "@/lib/tanstack";
 import type { TChatMessage } from "@/types/models/rag";
@@ -40,6 +44,8 @@ export default function Dashboard({
     stream_chat,
     abort,
     reset: reset_stream,
+    delete_confirmation_pending,
+    dismiss_delete_confirmation,
   } = useChatStream();
 
   const { data: workspacesData } = useGetWorkspaces();
@@ -86,6 +92,18 @@ export default function Dashboard({
     },
     onSettled: () => {
       setUploadQueue((n) => Math.max(0, n - 1));
+    },
+  });
+
+  const deleteEverythingMutation = useDeleteWorkspaceEverything({
+    onSuccess: () => {
+      dismiss_delete_confirmation();
+      invalidateQueries({ queryKey: ["useGetWorkspaces"] });
+      setActiveWs(null);
+      reset_stream();
+    },
+    onError: () => {
+      dismiss_delete_confirmation();
     },
   });
 
@@ -583,6 +601,73 @@ export default function Dashboard({
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Delete-everything confirmation dialog                               */}
+      {/* ------------------------------------------------------------------ */}
+      {delete_confirmation_pending && activeWs && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          {/* Backdrop */}
+          <div
+            className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+            onClick={dismiss_delete_confirmation}
+          />
+
+          {/* Dialog panel */}
+          <div className="relative z-10 w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl dark:bg-gray-900">
+            {/* Icon */}
+            <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-red-100 dark:bg-red-900/30">
+              <svg
+                className="h-6 w-6 text-red-600 dark:text-red-400"
+                fill="none"
+                viewBox="0 0 24 24"
+                strokeWidth={2}
+                stroke="currentColor"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z"
+                />
+              </svg>
+            </div>
+
+            <h2 className="mb-2 text-lg font-semibold text-gray-900 dark:text-white">
+              Delete everything?
+            </h2>
+            <p className="mb-6 text-sm text-gray-500 dark:text-gray-400">
+              This will permanently delete all{" "}
+              <strong className="text-gray-700 dark:text-gray-200">
+                chat messages, documents, tool calls, tasks
+              </strong>{" "}
+              and the workspace{" "}
+              <strong className="text-gray-700 dark:text-gray-200">
+                &ldquo;{activeWsName}&rdquo;
+              </strong>{" "}
+              itself. This action cannot be undone.
+            </p>
+
+            <div className="flex gap-3">
+              <button
+                onClick={dismiss_delete_confirmation}
+                disabled={deleteEverythingMutation.isPending}
+                className="flex-1 rounded-xl border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => deleteEverythingMutation.mutate(activeWs)}
+                disabled={deleteEverythingMutation.isPending}
+                className="flex-1 rounded-xl bg-red-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-60"
+              >
+                {deleteEverythingMutation.isPending
+                  ? "Deleting…"
+                  : "Yes, delete everything"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

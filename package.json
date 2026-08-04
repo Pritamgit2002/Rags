@@ -30,5 +30,8 @@
   ],
   "lint-staged": {
     "**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,mdx,css}": "prettier --write"
+  },
+  "dependencies": {
+    "@types/node": "^26.1.2"
   }
 }
